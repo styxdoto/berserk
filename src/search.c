@@ -438,28 +438,36 @@ int Negamax(int alpha, int beta, int depth, int cutnode, ThreadData* thread, PV*
     unsigned tbResult = TBProbe(board);
 
     if (tbResult != TB_RESULT_FAILED) {
-      IncRlx(thread->tbhits);
+        IncRlx(thread->tbhits);
 
-      score     = tbResult == TB_WIN ? TB_WIN_SCORE - ss->ply : tbResult == TB_LOSS ? -TB_WIN_SCORE + ss->ply : 0;
-      int bound = tbResult == TB_WIN ? BOUND_LOWER : tbResult == TB_LOSS ? BOUND_UPPER : BOUND_EXACT;
+        score = 0;
+        int bound = BOUND_EXACT;
 
-      // if the tablebase gives us what we want, then we accept it's score and
-      // return
-      if ((bound == BOUND_EXACT) || (bound == BOUND_LOWER ? score >= beta : score <= alpha)) {
-        TTPut(tt, board->zobrist, depth, score, bound, NULL_MOVE, ss->ply, ttEval, ttPv);
-        return score;
-      }
+        if (tbResult == TB_WIN) {
+            score = TB_WIN_SCORE - ss->ply;
+            bound = BOUND_LOWER;
+        } else if (tbResult == TB_LOSS) {
+            score = -TB_WIN_SCORE + ss->ply;
+            bound = BOUND_UPPER;
+        }
 
-      // for pv node searches we adjust our a/b search accordingly
-      if (isPV) {
-        if (bound == BOUND_LOWER) {
-          bestScore = score;
-          alpha     = Max(alpha, score);
-        } else
-          maxScore = score;
-      }
+        // if the tablebase gives us what we want, then we accept its score and return
+        if (bound == BOUND_EXACT || (bound == BOUND_LOWER && score >= beta) || (bound == BOUND_UPPER && score <= alpha)) {
+            TTPut(tt, board->zobrist, depth, score, bound, NULL_MOVE, ss->ply, ttEval, ttPv);
+            return score;
+        }
+
+        // for pv node searches, adjust our alpha-beta search accordingly
+        if (isPV) {
+            if (bound == BOUND_LOWER) {
+                bestScore = score;
+                alpha = Max(alpha, score);
+            } else {
+                maxScore = score;
+            }
+        }
     }
-  }
+}
 
   if (inCheck) {
     rawEval = eval = ss->staticEval = EVAL_UNKNOWN;
@@ -567,10 +575,10 @@ int Negamax(int alpha, int beta, int depth, int cutnode, ThreadData* thread, PV*
     // less than beta + margin, then we run a shallow search to look
     int probBeta = beta + 197;
     if (depth >= 5 && !ss->skip && abs(beta) < TB_WIN_BOUND && !(ttHit && ttDepth >= depth - 3 && ttScore < probBeta)) {
-      InitPCMovePicker(&mp, thread, probBeta > eval);
-      while ((move = NextMove(&mp, board, 1))) {
+    InitPCMovePicker(&mp, thread, probBeta > eval);
+    while ((move = NextMove(&mp, board, 1))) {
         if (!IsLegal(move, board))
-          continue;
+            continue;
 
         TTPrefetch(KeyAfter(board, move));
         ss->move = move;
@@ -582,15 +590,15 @@ int Negamax(int alpha, int beta, int depth, int cutnode, ThreadData* thread, PV*
 
         // if it's still above our cutoff, revalidate
         if (score >= probBeta)
-          score = -Negamax(-probBeta, -probBeta + 1, depth - 4, !cutnode, thread, pv, ss + 1);
+            score = -Negamax(-probBeta, -probBeta + 1, depth - 4, !cutnode, thread, pv, ss + 1);
 
         UndoMove(move, board);
 
         if (score >= probBeta)
-          return score;
+            return score;
+        }
       }
     }
-  }
 
   int numQuiets = 0, numCaptures = 0;
   Move quiets[64], captures[32];
@@ -619,27 +627,28 @@ int Negamax(int alpha, int beta, int depth, int cutnode, ThreadData* thread, PV*
     R += (IsCap(hashMove) || IsPromo(hashMove)); // increase reduction if hash move is noisy
 
     if (bestScore > -TB_WIN_BOUND) {
-      if (!isRoot && legalMoves >= LMP[improving][depth])
+    if (!isRoot && legalMoves >= LMP[improving][depth])
         skipQuiets = 1;
 
-      if (!IsCap(move) && PromoPT(move) != QUEEN) {
-        int lmrDepth = Max(1, depth - R);
+    if (!IsCap(move) && PromoPT(move) != QUEEN) {
+        int lmrDepth = depth - R;
+        if (lmrDepth < 1) lmrDepth = 1;
 
         if (!killerOrCounter && lmrDepth < 7 && history < -2658 * (depth - 1)) {
-          skipQuiets = 1;
-          continue;
+            skipQuiets = 1;
+            continue;
         }
 
         if (!inCheck && lmrDepth < 10 && eval + 87 + 46 * lmrDepth <= alpha)
-          skipQuiets = 1;
+            skipQuiets = 1;
 
         if (!SEE(board, move, STATIC_PRUNE[0][lmrDepth]))
-          continue;
-      } else {
+            continue;
+    } else {
         if (!SEE(board, move, STATIC_PRUNE[1][depth]))
-          continue;
-      }
+            continue;
     }
+}
 
     playedMoves++;
 
@@ -661,37 +670,43 @@ int Negamax(int alpha, int beta, int depth, int cutnode, ThreadData* thread, PV*
     // the tt evaluation implemented using "skip move" recursion like in SF
     // (allows for reductions when doing singular search)
     if (!isRoot && ss->ply < thread->depth * 2) {
-      // ttHit is implied for move == hashMove to ever be true
-      if (depth >= 6 && move == hashMove && ttDepth >= depth - 3 && (ttBound & BOUND_LOWER) &&
-          abs(ttScore) < TB_WIN_BOUND) {
-        int sBeta  = Max(ttScore - 5 * depth / 8, -CHECKMATE);
-        int sDepth = (depth - 1) / 2;
+    // ttHit is implied for move == hashMove to ever be true
+    if (depth >= 6 && move == hashMove && ttDepth >= depth - 3 && (ttBound & BOUND_LOWER) &&
+        abs(ttScore) < TB_WIN_BOUND) {
+        
+        int sBeta  = ttScore - (5 * depth >> 3);
+        if (sBeta < -CHECKMATE)
+            sBeta = -CHECKMATE;
+        int sDepth = (depth - 1) >> 1;
 
         ss->skip = move;
         score    = Negamax(sBeta - 1, sBeta, sDepth, cutnode, thread, pv, ss);
         ss->skip = NULL_MOVE;
 
-        // no score failed above sBeta, so this is singular
+        // Check if score < sBeta and adjust extensions accordingly
         if (score < sBeta) {
-          if (!isPV && score < sBeta - 50 && ss->de <= 6 && !IsCap(move)) {
-            extension = 3;
-            ss->de    = (ss - 1)->de + 1;
-          } else if (!isPV && score < sBeta - 17 && ss->de <= 6) {
-            extension = 2;
-            ss->de    = (ss - 1)->de + 1;
-          } else {
-            extension = 1;
-          }
-        } else if (sBeta >= beta)
-          return sBeta;
-        else if (ttScore >= beta)
-          extension = -2 + isPV;
-        else if (cutnode)
-          extension = -2;
-        else if (ttScore <= alpha)
-          extension = -1;
-      }
+            if (!isPV && ss->de <= 6) {
+                if (score < sBeta - 50 && !IsCap(move)) {
+                    extension = 3;
+                    ss->de    = (ss - 1)->de + 1;
+                } else if (score < sBeta - 17) {
+                    extension = 2;
+                    ss->de    = (ss - 1)->de + 1;
+                } else {
+                    extension = 1;
+                }
+            } else {
+                extension = 1;
+            }
+        } else if (sBeta >= beta) {
+            return sBeta;
+        } else if (ttScore >= beta) {
+            extension = -2 + isPV;
+        } else if (ttScore <= alpha) {
+            extension = -1;
+        }
     }
+}
 
     TTPrefetch(KeyAfter(board, move));
     ss->move = move;
